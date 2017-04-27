@@ -130,6 +130,17 @@ def report_results():
             print(fpath)
         print('---------------------------------')
 
+def check_filetypes(new, changed):
+    """Input the lists new_files and changed_files. Returns the sum of the error codes"""
+    import subprocess
+    errors = 0
+    for files in [new_files, changed_files]:
+        for fpath in files:
+            # subprocess.call(["file", fpath]) returns an error code and automatically prints the response
+            # There is a filemagic library that would likely be better but I did not want to introduce it as a dependancy
+            errors += subprocess.call(["file", fpath])
+    return(errors)
+
 if __name__ == '__main__':
     # This allows people to either run the script from the command line or import the check_files/update_files function seperately.
     parser = argparse.ArgumentParser()
@@ -138,7 +149,11 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--task', required=True, choices=['update','check'], help='specify task to perform')
     parser.add_argument('-w', '--whitelist', help='the full path to whitelist file')
     parser.add_argument('-vt', '--virustotal', help='specify your VirusTotal API key for checking if modified files have been flagged by VT, (warning: this is slow due to API req limits)')
+    parser.add_argument('-c', '--check-filetype', action='store_true', help='check the filetype of each changed file, only valid with --task update')
     args = parser.parse_args()
+    if args.check_filetype and args.task != 'check':
+        print('--check-fileype can only be used with -task update')
+        exit(1)
     if not args.whitelist:
         use_whitelist = False
     elif args.whitelist:
@@ -158,6 +173,11 @@ if __name__ == '__main__':
             vt_key = False
         check_files(cache_file, path_to_files, vt_key)
         report_results()
+        if args.check_filetype:
+            errors = check_filetypes(new_files, changed_files)
+            if errors:
+                # I can only see this error occuring if a file that was changed or added gets removed during runtime
+                print('{} Error(s) whilst checking files'.format(errors))
     elif args.task == 'update':
         update_hashes(cache_file, path_to_files)
         print('Hashes Updated')
