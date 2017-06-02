@@ -2,7 +2,17 @@
 
 delimiter = '|' # Choose the delimiter in the cache file, if you have a pipe symbol in file names you should change this
 
-import os, hashlib, argparse, time, requests
+import os
+import hashlib
+import argparse
+import time
+try:
+    import requests
+except:
+    print("This script is dependent on the requests library\nTo install it in a python3 virtualenv run:\npython3 -m venv venv\nsource venv/bin/activate\npip install requests")
+    exit(1)
+import re
+import sys
 # Using md5 as it's an inbuilt hashlib function, there's better algorithms for speed with low collisions,
 # however they're not easily cross platform compatible.
 
@@ -108,6 +118,84 @@ def check_path(path_to_files):
     else:
         return(False)
 
+def find_wordpress_version(files):
+    def pull_version(version_file):
+        with open(os.path.join(version_file), 'r') as version_file:
+            for line in version_file:
+                if "$wp_version" in line:
+                    try:
+                        version = re.match(r"""\$wp_version = '(.*)'.*""", line).group(1)
+                    except:
+                        continue
+                    return version
+            return ''
+
+    try:
+        version = pull_version(os.path.join(files, "wp-includes/version.php"))
+    except IOError:
+        print("Locating wordpress version file")
+        result = []
+        for root, dirs, files in os.walk(files):
+            if "version.php" in files:
+                result.append(os.path.join(root, "version.php"))
+
+        if len(result) > 1:
+            for file_name in result:
+                if not "wp-includes/version.php" in file_name:
+                    result.remove(file_name)
+
+        if len(result) != 1:
+            if len(result) == 0:
+                print("No WordPress version file found")
+                return ''
+            else:
+                show_files = raw_input("Multiple version files found show files? [y/N]: ")
+                if show_files != "y" and show_files != "Y":
+                    return ''
+
+                for file_path in result:
+                    print(file_path)
+
+                version_file = raw_input("Which is the correct file? (Leave blank to skip finding WordPress version)\n")
+                if not version_file in result:
+                    return ''
+
+        if len(result) == 1:
+            version_file = result[0]
+
+        try:
+            version = pull_version(version_file)
+        except IOError:
+            print("Error opening wordpress version file")
+
+    return version
+
+def get_wordpress_version_changelog(version):
+    if not version:
+        print("No version given")
+        return ''
+    try:
+        response = requests.get("https://codex.wordpress.org/Version_{}".format(version))
+    except requests.exceptions.ConnectionError:
+        urn("Connection Error")
+    if response.status_code != 200:
+        print("{} Error from server".format(response.status_code))
+        return ''
+    if sys.version_info[0] == 3:
+        try:
+            return re.match(r""".*class="mw-headline" id="List_of_Files_Revised">List of Files Revised</span></h2>\\n<pre>\\n(.*)\\n</pre>.*""", str(response._content)).group(1).replace(r"\n", "\n")
+        except:
+            # WordPress versions before 2.0.4 didn't have a a changelog in this format, I'm sure this will catch other errors
+            print("Couldn't interperate response from server")
+            return ''
+    try:
+        return re.match(r""".*class="mw-headline" id="List_of_Files_Revised">List of Files Revised</span></h2>\\n<pre>\\n(.*)\\n</pre>.*""", repr(str(response._content))).group(1).replace(r"\n", "\n")
+    except:
+        # WordPress versions before 2.0.4 didn't have a a changelog in this format, I'm sure this will catch other errors
+        print("Couldn't interperate response from server")
+        return ''
+
+
 def report_results():
     if new_files:
         print('The following new files were created:')
@@ -130,17 +218,6 @@ def report_results():
             print(fpath)
         print('---------------------------------')
 
-def check_filetypes(new, changed):
-    """Input the lists new_files and changed_files. Returns the sum of the error codes"""
-    import subprocess
-    errors = 0
-    for files in [new_files, changed_files]:
-        for fpath in files:
-            # subprocess.call(["file", fpath]) returns an error code and automatically prints the response
-            # There is a filemagic library that would likely be better but I did not want to introduce it as a dependancy
-            errors += subprocess.call(["file", fpath])
-    return(errors)
-
 if __name__ == '__main__':
     # This allows people to either run the script from the command line or import the check_files/update_files function seperately.
     parser = argparse.ArgumentParser()
@@ -149,11 +226,8 @@ if __name__ == '__main__':
     parser.add_argument('-t', '--task', required=True, choices=['update','check'], help='specify task to perform')
     parser.add_argument('-w', '--whitelist', help='the full path to whitelist file')
     parser.add_argument('-vt', '--virustotal', help='specify your VirusTotal API key for checking if modified files have been flagged by VT, (warning: this is slow due to API req limits)')
-    parser.add_argument('-c', '--check-filetype', action='store_true', help='check the filetype of each changed file, only valid with --task update')
+    parser.add_argument('-i', '--interactive', action='store_true', help='Checks for wordpress updates and sorts the output, only valid with --task update')
     args = parser.parse_args()
-    if args.check_filetype and args.task != 'check':
-        print('--check-fileype can only be used with -task update')
-        exit(1)
     if not args.whitelist:
         use_whitelist = False
     elif args.whitelist:
@@ -173,11 +247,20 @@ if __name__ == '__main__':
             vt_key = False
         check_files(cache_file, path_to_files, vt_key)
         report_results()
-        if args.check_filetype:
-            errors = check_filetypes(new_files, changed_files)
-            if errors:
-                # I can only see this error occuring if a file that was changed or added gets removed during runtime
-                print('{} Error(s) whilst checking files'.format(errors))
+        if args.interactive:
+            # This might not be the correct way to do this
+            if sys.version_info[0] == 3:
+                raw_input = input
+            if changed_files or new_files:
+                check_update = raw_input("Check if this was a WordPress update? [y/N]: ")
+                if check_update == "y" or check_update == "Y":
+                    wp_version = find_wordpress_version(path_to_files)
+                    if wp_version:
+                        print("Detected WordPress version as {}".format(wp_version))
+                        wp_updated_files = get_wordpress_version_changelog(wp_version)
+                        if wp_updated_files:
+                            print("The following files should have changed:\n{}".format(wp_updated_files))
+
     elif args.task == 'update':
         update_hashes(cache_file, path_to_files)
         print('Hashes Updated')
